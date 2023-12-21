@@ -23,15 +23,15 @@ func main() {
 
 	fmt.Println("Listening to UDP packets on:", addr)
 
-	buffer := make([]byte, 1024)
-
 	for {
-		n, addr, err := conn.ReadFromUDP(buffer)
+		buffer := make([]byte, 1024)
+		n, remoteAddr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			fmt.Println("Error reading from UDP socket:", err)
 			return
 		}
 
-		fmt.Printf("Received %d bytes from %s: %s\n", n, addr, string(buffer))
+		fmt.Printf("Received %d bytes from %s: %s\n", n, remoteAddr, string(buffer))
+		conn.WriteMsgUDP(buffer[:n], make([]byte, 0), remoteAddr)
 	}
 }
