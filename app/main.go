@@ -5,6 +5,16 @@ import (
 	"net"
 )
 
+const HEADERBYTES = 12
+
+type DNSMessage struct {
+	header     []byte
+	question   []byte
+	answer     []byte
+	authority  []byte
+	additional []byte
+}
+
 func main() {
 	addr := "127.0.0.1:2053"
 
@@ -31,7 +41,11 @@ func main() {
 			return
 		}
 
-		fmt.Printf("Received %d bytes from %s: %s\n", n, remoteAddr, string(buffer))
-		conn.WriteMsgUDP(buffer[:n], make([]byte, 0), remoteAddr)
+		fmt.Printf("Received %d bytes from %s\n", n, remoteAddr)
+
+		var msg DNSMessage
+		msg.header = buffer[:HEADERBYTES]
+
+		conn.WriteMsgUDP(msg.header, make([]byte, 0), remoteAddr)
 	}
 }
