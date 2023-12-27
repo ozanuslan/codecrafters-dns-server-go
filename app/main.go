@@ -54,6 +54,9 @@ func main() {
 		dnsMessage.Header.Response = true
 		dnsMessage.Header.AnswerCount = 1
 		dnsMessage.AddResource(defaultDNSResource)
+		if dnsMessage.Header.Opcode != 0 {
+			dnsMessage.Header.ResponseCode = 4
+		}
 
 		fmt.Println("Response:", dnsMessage.String())
 		response, err := dnsMessage.Marshal()
