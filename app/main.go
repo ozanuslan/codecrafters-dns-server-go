@@ -53,9 +53,25 @@ func main() {
 
 		dnsMessage.Header.Response = true
 		dnsMessage.Header.AnswerCount = 1
-		dnsMessage.AddResource(defaultDNSResource)
 		if dnsMessage.Header.Opcode != 0 {
 			dnsMessage.Header.ResponseCode = 4
+		}
+
+		for _, q := range dnsMessage.Questions {
+			qName := q.Name.String()
+			qType := q.Type
+			if qType == dns.TypeANY {
+				qType = dns.TypeA
+			}
+			qClass := q.Class
+			if qClass == dns.ClassANY {
+				qClass = dns.ClassIN
+			}
+			qTTL := uint32(60)
+			data := defaultDNSResource.Data
+			len := len(data)
+
+			dnsMessage.AddResource(dns.MakeResource(qName, qType, qClass, qTTL, data[:len]))
 		}
 
 		fmt.Println("Response:", dnsMessage.String())

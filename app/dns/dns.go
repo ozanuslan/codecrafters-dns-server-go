@@ -180,7 +180,7 @@ func (h *DNSHeader) String() string {
 type DNSQuestion struct {
 	Name  DomainName
 	Type  DNSResourceType
-	Class uint16
+	Class DNSClass
 }
 
 func unmarshalDNSQuestions(data []byte, questionCount int) ([]DNSQuestion, error) {
@@ -202,7 +202,7 @@ func unmarshalDNSQuestions(data []byte, questionCount int) ([]DNSQuestion, error
 		questions = append(questions, DNSQuestion{
 			Name:  *domainName,
 			Type:  DNSResourceType(binary.BigEndian.Uint16(typeData)),
-			Class: binary.BigEndian.Uint16(classData),
+			Class: DNSClass(binary.BigEndian.Uint16(classData)),
 		})
 	}
 
@@ -222,7 +222,7 @@ func marshallDNSQuestions(questions []DNSQuestion) ([]byte, error) {
 		typeData := make([]byte, 2)
 		binary.BigEndian.PutUint16(typeData, uint16(question.Type))
 		classData := make([]byte, 2)
-		binary.BigEndian.PutUint16(classData, question.Class)
+		binary.BigEndian.PutUint16(classData, uint16(question.Class))
 
 		data = append(data, nameData...)
 		data = append(data, typeData...)
@@ -311,6 +311,7 @@ const (
 	TypeAAAA  DNSResourceType = 28
 	TypeSRV   DNSResourceType = 33
 	TypeOPT   DNSResourceType = 41
+	TypeANY   DNSResourceType = 255
 )
 
 func (t DNSResourceType) String() string {
@@ -343,7 +344,11 @@ func (t DNSResourceType) String() string {
 type DNSClass uint16
 
 const (
-	ClassIN DNSClass = 1
+	ClassIN  DNSClass = 1
+	ClassCS  DNSClass = 2
+	ClassCH  DNSClass = 3
+	ClassHS  DNSClass = 4
+	ClassANY DNSClass = 255
 )
 
 type DNSResource struct {
