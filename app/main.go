@@ -7,6 +7,14 @@ import (
 	"github.com/codecrafters-io/dns-server-starter-go/app/dns"
 )
 
+var defaultDNSResource = dns.MakeResource(
+	"codecrafters.io",
+	dns.TypeA,
+	dns.ClassIN,
+	60,
+	[]byte{127, 0, 0, 1},
+)
+
 func main() {
 	addr := "127.0.0.1:2053"
 
@@ -45,6 +53,7 @@ func main() {
 
 		dnsMessage.Header.Response = true
 		dnsMessage.Header.AnswerCount = 1
+		dnsMessage.AddResource(defaultDNSResource)
 
 		fmt.Println("Response:", dnsMessage.String())
 		response, err := dnsMessage.Marshal()

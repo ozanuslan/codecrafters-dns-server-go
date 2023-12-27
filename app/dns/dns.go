@@ -9,6 +9,12 @@ import (
 type DNSMessage struct {
 	Header    DNSHeader
 	Questions []DNSQuestion
+	Resources []DNSResource
+}
+
+func (m *DNSMessage) AddResource(resource DNSResource) {
+	m.Resources = append(m.Resources, resource)
+	m.Header.AnswerCount = uint16(len(m.Resources))
 }
 
 func (m *DNSMessage) Marshal() ([]byte, error) {
@@ -22,9 +28,15 @@ func (m *DNSMessage) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
-	data := make([]byte, len(headerData)+len(questionData))
-	copy(data, headerData)
-	copy(data[len(headerData):], questionData)
+	resourceData, err := marshallDNSResources(m.Resources)
+	if err != nil {
+		return nil, err
+	}
+
+	data := make([]byte, 0)
+	data = append(data, headerData...)
+	data = append(data, questionData...)
+	data = append(data, resourceData...)
 
 	return data, nil
 }
@@ -41,6 +53,12 @@ func (m *DNSMessage) Unmarshal(data []byte) error {
 		return err
 	}
 	m.Questions = questions
+
+	resources, err := unmarshalDNSResources(data[12:], int(m.Header.AnswerCount))
+	if err != nil {
+		return err
+	}
+	m.Resources = resources
 
 	return nil
 }
@@ -161,7 +179,7 @@ func (h *DNSHeader) String() string {
 
 type DNSQuestion struct {
 	Name  DomainName
-	Type  DNSQuestionType
+	Type  DNSResourceType
 	Class uint16
 }
 
@@ -183,7 +201,7 @@ func unmarshalDNSQuestions(data []byte, questionCount int) ([]DNSQuestion, error
 
 		questions = append(questions, DNSQuestion{
 			Name:  *domainName,
-			Type:  DNSQuestionType(binary.BigEndian.Uint16(typeData)),
+			Type:  DNSResourceType(binary.BigEndian.Uint16(typeData)),
 			Class: binary.BigEndian.Uint16(classData),
 		})
 	}
@@ -280,44 +298,149 @@ func (d *DomainName) String() string {
 	return strings.Join(d.Labels, ".")
 }
 
-type DNSQuestionType uint16
+type DNSResourceType uint16
 
 const (
-	A     DNSQuestionType = 1
-	NS    DNSQuestionType = 2
-	CNAME DNSQuestionType = 5
-	SOA   DNSQuestionType = 6
-	PTR   DNSQuestionType = 12
-	MX    DNSQuestionType = 15
-	TXT   DNSQuestionType = 16
-	AAAA  DNSQuestionType = 28
-	SRV   DNSQuestionType = 33
-	OPT   DNSQuestionType = 41
+	TypeA     DNSResourceType = 1
+	TypeNS    DNSResourceType = 2
+	TypeCNAME DNSResourceType = 5
+	TypeSOA   DNSResourceType = 6
+	TypePTR   DNSResourceType = 12
+	TypeMX    DNSResourceType = 15
+	TypeTXT   DNSResourceType = 16
+	TypeAAAA  DNSResourceType = 28
+	TypeSRV   DNSResourceType = 33
+	TypeOPT   DNSResourceType = 41
 )
 
-func (t DNSQuestionType) String() string {
+func (t DNSResourceType) String() string {
 	switch t {
-	case A:
+	case TypeA:
 		return "A"
-	case NS:
+	case TypeNS:
 		return "NS"
-	case CNAME:
+	case TypeCNAME:
 		return "CNAME"
-	case SOA:
+	case TypeSOA:
 		return "SOA"
-	case PTR:
+	case TypePTR:
 		return "PTR"
-	case MX:
+	case TypeMX:
 		return "MX"
-	case TXT:
+	case TypeTXT:
 		return "TXT"
-	case AAAA:
+	case TypeAAAA:
 		return "AAAA"
-	case SRV:
+	case TypeSRV:
 		return "SRV"
-	case OPT:
+	case TypeOPT:
 		return "OPT"
 	default:
-		return fmt.Sprintf("DNSQuestionType(%d)", t)
+		return fmt.Sprintf("Unknown(%d)", t)
+	}
+}
+
+type DNSClass uint16
+
+const (
+	ClassIN DNSClass = 1
+)
+
+type DNSResource struct {
+	Name     DomainName
+	Type     DNSResourceType
+	Class    DNSClass
+	TTL      uint32
+	Data     []byte
+	DataName DomainName
+}
+
+func (r *DNSResource) String() string {
+	return fmt.Sprintf(
+		"DNSResource{Name: %s, Type: %s, Class: %d, TTL: %d, Data: %s, DataName: %s}",
+		r.Name,
+		r.Type,
+		r.Class,
+		r.TTL,
+		r.Data,
+		r.DataName,
+	)
+}
+
+func unmarshalDNSResources(data []byte, resourceCount int) ([]DNSResource, error) {
+	resources := make([]DNSResource, 0)
+
+	for i := 0; i < resourceCount; i++ {
+		domainName, err := unmarshalDomainName(data)
+		if err != nil {
+			return nil, err
+		}
+		data = data[domainName.Len()+1:]
+
+		// Unmarshal type, class and ttl
+		typeData := data[:2]
+		data = data[2:]
+		classData := data[:2]
+		data = data[2:]
+		ttlData := data[:4]
+		data = data[4:]
+
+		// Unmarshal data length and data
+		dataLength := int(binary.BigEndian.Uint16(data[:2]))
+		data = data[2:]
+		resourceData := data[:dataLength]
+		data = data[dataLength:]
+
+		resources = append(resources, DNSResource{
+			Name:  *domainName,
+			Type:  DNSResourceType(binary.BigEndian.Uint16(typeData)),
+			Class: DNSClass(binary.BigEndian.Uint16(classData)),
+			TTL:   binary.BigEndian.Uint32(ttlData),
+			Data:  resourceData,
+		})
+	}
+
+	return resources, nil
+}
+
+func marshallDNSResources(resources []DNSResource) ([]byte, error) {
+	data := make([]byte, 0)
+
+	for _, resource := range resources {
+		nameData, err := marshalDomainName(&resource.Name)
+		if err != nil {
+			return nil, err
+		}
+
+		// Marshal type, class and ttl
+		typeData := make([]byte, 2)
+		binary.BigEndian.PutUint16(typeData, uint16(resource.Type))
+		classData := make([]byte, 2)
+		binary.BigEndian.PutUint16(classData, uint16(resource.Class))
+		ttlData := make([]byte, 4)
+		binary.BigEndian.PutUint32(ttlData, resource.TTL)
+
+		// Marshal data length and data
+		dataLengthData := make([]byte, 2)
+		binary.BigEndian.PutUint16(dataLengthData, uint16(len(resource.Data)))
+
+		data = append(data, nameData...)
+		data = append(data, typeData...)
+		data = append(data, classData...)
+		data = append(data, ttlData...)
+		data = append(data, dataLengthData...)
+		data = append(data, resource.Data...)
+	}
+
+	return data, nil
+}
+
+func MakeResource(name string, resourceType DNSResourceType, class DNSClass, ttl uint32, data []byte) DNSResource {
+	return DNSResource{
+		Name:  DomainName{Labels: strings.Split(name, ".")},
+		Type:  resourceType,
+		Class: 1,
+		TTL:   ttl,
+		Data:  data,
 	}
 }
