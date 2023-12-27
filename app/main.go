@@ -36,17 +36,18 @@ func main() {
 		fmt.Printf("Received %d bytes from %s\n", n, clientAddr)
 
 		dnsMessage := &dns.DNSMessage{}
-
 		err = dnsMessage.Unmarshal(buffer[:n])
 		if err != nil {
 			fmt.Println("Error unmarshalling DNS header:", err)
 			return
 		}
+		fmt.Println("Request :", dnsMessage.String())
 
 		dnsMessage.Header.Response = true
+		dnsMessage.Header.AnswerCount = 1
 
+		fmt.Println("Response:", dnsMessage.String())
 		response, err := dnsMessage.Marshal()
-		fmt.Printf("Response: %v\n", response)
 		if err != nil {
 			fmt.Println("Error marshalling DNS header:", err)
 			return
