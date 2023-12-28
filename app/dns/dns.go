@@ -1,451 +1,430 @@
 package dns
 
 import (
-	"encoding/binary"
 	"fmt"
 	"strings"
 )
 
 type DNSMessage struct {
-	Header    DNSHeader
-	Questions []DNSQuestion
-	Resources []DNSResource
+	Header    Header
+	Questions []Question
+	AnswerRRs []ResourceRecord
 }
 
-func (m *DNSMessage) AddResource(resource DNSResource) {
-	m.Resources = append(m.Resources, resource)
-	m.Header.AnswerCount = uint16(len(m.Resources))
-}
-
-func (m *DNSMessage) Marshal() ([]byte, error) {
-	headerData, err := marshalDNSHeader(&m.Header)
-	if err != nil {
-		return nil, err
-	}
-
-	questionData, err := marshallDNSQuestions(m.Questions)
-	if err != nil {
-		return nil, err
-	}
-
-	resourceData, err := marshallDNSResources(m.Resources)
-	if err != nil {
-		return nil, err
-	}
-
+func (d *DNSMessage) Marshal() ([]byte, error) {
 	data := make([]byte, 0)
-	data = append(data, headerData...)
-	data = append(data, questionData...)
-	data = append(data, resourceData...)
+
+	// Marshal header
+	headerBytes := d.Header.Bytes()
+	data = append(data, headerBytes...)
+
+	// Marshal questions
+	for _, question := range d.Questions {
+		questionBytes, err := question.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, questionBytes...)
+	}
+
+	// Marshal answer RRs
+	for _, rr := range d.AnswerRRs {
+		rrBytes, err := rr.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, rrBytes...)
+	}
 
 	return data, nil
 }
 
-func (m *DNSMessage) Unmarshal(data []byte) error {
-	header, err := unmarshalDNSHeader(data)
-	if err != nil {
-		return err
+func (d *DNSMessage) Unmarshal(data []byte) error {
+	if len(data) < 12 {
+		return fmt.Errorf("header is too short")
 	}
-	m.Header = *header
 
-	questions, err := unmarshalDNSQuestions(data[12:], int(m.Header.QuestionCount))
-	if err != nil {
-		return err
+	d.Header = Header{
+		ID:      uint16(data[0])<<8 | uint16(data[1]),
+		QR:      data[2]>>7 == 1,
+		OPCODE:  OPCode(data[2]>>3) & 0x0F,
+		AA:      data[2]>>2 == 1,
+		TC:      data[2]>>1 == 1,
+		RD:      data[2]&0x01 == 1,
+		RA:      data[3]>>7 == 1,
+		Z:       data[3] >> 4 & 0x07,
+		RCODE:   RCode(data[3] & 0x0F),
+		QDCOUNT: uint16(data[4])<<8 | uint16(data[5]),
+		ANCOUNT: uint16(data[6])<<8 | uint16(data[7]),
+		NSCOUNT: uint16(data[8])<<8 | uint16(data[9]),
+		ARCOUNT: uint16(data[10])<<8 | uint16(data[11]),
 	}
-	m.Questions = questions
 
-	resources, err := unmarshalDNSResources(data[12:], int(m.Header.AnswerCount))
-	if err != nil {
-		return err
+	d.Questions = make([]Question, d.Header.QDCOUNT)
+	offset := 12
+
+	for i := 0; i < int(d.Header.QDCOUNT); i++ {
+		// support compression
+		// https://tools.ietf.org/html/rfc1035#section-4.1.4
+
+		qNameOffset := offset
+
+		if data[offset]>>6 == 3 {
+			// compression
+			qNameOffset = int(data[offset]&0x3F)<<8 | int(data[offset+1])
+		}
+
+		name := ""
+		totalPointerMoves := 0
+		for {
+			labelLength := int(data[qNameOffset])
+			if labelLength == 0 {
+				break
+			}
+			qNameOffset++
+			totalPointerMoves++
+			label := string(data[qNameOffset : qNameOffset+labelLength])
+			name += label + "."
+			qNameOffset += labelLength
+			totalPointerMoves += labelLength
+		}
+		offset += totalPointerMoves + 1
+
+		// unmarshal TYPE
+		qtype := Type(uint16(data[offset])<<8 | uint16(data[offset+1]))
+		offset += 2
+
+		// unmarshal CLASS
+		qclass := Class(uint16(data[offset])<<8 | uint16(data[offset+1]))
+		offset += 2
+
+		d.Questions[i] = Question{
+			QNAME:  name,
+			QTYPE:  qtype,
+			QCLASS: qclass,
+		}
 	}
-	m.Resources = resources
+
+	d.AnswerRRs = make([]ResourceRecord, d.Header.ANCOUNT)
+	for i := 0; i < int(d.Header.ANCOUNT); i++ {
+		// no need for compression support here
+
+		// unmarshal NAME
+		name := ""
+		for {
+			labelLength := int(data[offset])
+			if labelLength == 0 {
+				break
+			}
+			offset++
+			label := string(data[offset : offset+labelLength])
+			name += label + "."
+			offset += labelLength
+		}
+		offset++
+
+		// unmarshal TYPE
+		rrType := Type(uint16(data[offset])<<8 | uint16(data[offset+1]))
+		offset += 2
+
+		// unmarshal CLASS
+		rrClass := Class(uint16(data[offset])<<8 | uint16(data[offset+1]))
+		offset += 2
+
+		// unmarshal TTL
+		ttl := uint32(data[offset])<<24 | uint32(data[offset+1])<<16 | uint32(data[offset+2])<<8 | uint32(data[offset+3])
+		offset += 4
+
+		// unmarshal RDLENGTH
+		rdLength := uint16(data[offset])<<8 | uint16(data[offset+1])
+		offset += 2
+
+		// unmarshal RDATA
+		rdata, err := unmarshalRecord(rrType, data, offset)
+		if err != nil {
+			return err
+		}
+
+		d.AnswerRRs[i] = ResourceRecord{
+			NAME:     name,
+			TYPE:     rrType,
+			CLASS:    rrClass,
+			TTL:      ttl,
+			RDLENGTH: rdLength,
+			RDATA:    rdata,
+		}
+	}
 
 	return nil
 }
 
-func (m *DNSMessage) questionsString() []string {
-	questions := make([]string, 0)
-	for _, question := range m.Questions {
-		questions = append(questions, question.String())
-	}
-	return questions
+func (d DNSMessage) String() string {
+	return fmt.Sprintf("Header: %s, Questions: %v, AnswerRRs: %v",
+		d.Header, d.Questions, d.AnswerRRs)
 }
 
-func (m *DNSMessage) String() string {
-	return fmt.Sprintf(
-		"DNSMessage{Header: %s, Questions: [%s]}",
-		m.Header.String(),
-		strings.Join(m.questionsString(), ", "),
-	)
+type Header struct {
+	ID      uint16
+	QR      bool
+	OPCODE  OPCode
+	AA      bool
+	TC      bool
+	RD      bool
+	RA      bool
+	Z       uint8
+	RCODE   RCode
+	QDCOUNT uint16
+	ANCOUNT uint16
+	NSCOUNT uint16
+	ARCOUNT uint16
 }
 
-type DNSHeader struct {
-	ID                 uint16
-	Response           bool
-	Opcode             uint8
-	Authoritative      bool
-	Truncated          bool
-	RecursionDesired   bool
-	RecursionAvailable bool
-	Reserved           uint8
-	ResponseCode       uint8
-	QuestionCount      uint16
-	AnswerCount        uint16
-	AuthorityCount     uint16
-	AdditionalCount    uint16
+func (h Header) String() string {
+	return fmt.Sprintf("ID: %d, QR: %v, OPCODE: %s, AA: %v, TC: %v, RD: %v, RA: %v, Z: %v, RCODE: %s, QDCOUNT: %d, ANCOUNT: %d, NSCOUNT: %d, ARCOUNT: %d",
+		h.ID, h.QR, h.OPCODE, h.AA, h.TC, h.RD, h.RA, h.Z, h.RCODE, h.QDCOUNT, h.ANCOUNT, h.NSCOUNT, h.ARCOUNT)
 }
 
-func unmarshalDNSHeader(data []byte) (*DNSHeader, error) {
-	if len(data) < 12 {
-		return nil, fmt.Errorf("insufficient data to unmarshal DNS header")
-	}
-
-	header := &DNSHeader{}
-
-	// Unmarshal fields using binary.BigEndian
-	header.ID = binary.BigEndian.Uint16(data[:2])
-	header.Response = (data[2] & 0x80) != 0
-	header.Opcode = (data[2] >> 3) & 0x0F
-	header.Authoritative = (data[2] & 0x04) != 0
-	header.Truncated = (data[2] & 0x02) != 0
-	header.RecursionDesired = (data[2] & 0x01) != 0
-	header.RecursionAvailable = (data[3] & 0x80) != 0
-	header.Reserved = (data[3] >> 4) & 0x07
-	header.ResponseCode = data[3] & 0x0F
-	header.QuestionCount = binary.BigEndian.Uint16(data[4:6])
-	header.AnswerCount = binary.BigEndian.Uint16(data[6:8])
-	header.AuthorityCount = binary.BigEndian.Uint16(data[8:10])
-	header.AdditionalCount = binary.BigEndian.Uint16(data[10:12])
-
-	return header, nil
-}
-
-func marshalDNSHeader(header *DNSHeader) ([]byte, error) {
-	data := make([]byte, 12)
-
-	// Marshal fields using binary.BigEndian
-	binary.BigEndian.PutUint16(data[:2], header.ID)
-
-	flags := uint8(0)
-	if header.Response {
-		flags |= 0x80
-	}
-	flags |= (header.Opcode & 0x0F) << 3
-	if header.Authoritative {
-		flags |= 0x04
-	}
-	if header.Truncated {
-		flags |= 0x02
-	}
-	if header.RecursionDesired {
-		flags |= 0x01
-	}
-	data[2] = flags
-
-	flags2 := uint8(0)
-	if header.RecursionAvailable {
-		flags2 |= 0x80
-	}
-	flags2 |= (header.Reserved & 0x07) << 4
-	flags2 |= header.ResponseCode & 0x0F
-	data[3] = flags2
-
-	binary.BigEndian.PutUint16(data[4:6], header.QuestionCount)
-	binary.BigEndian.PutUint16(data[6:8], header.AnswerCount)
-	binary.BigEndian.PutUint16(data[8:10], header.AuthorityCount)
-	binary.BigEndian.PutUint16(data[10:12], header.AdditionalCount)
-
-	return data, nil
-}
-
-func (h *DNSHeader) String() string {
-	return fmt.Sprintf(
-		"DNSHeader{ID: %d, Response: %t, Opcode: %d, Authoritative: %t, Truncated: %t, RecursionDesired: %t, RecursionAvailable: %t, Reserved: %d, ResponseCode: %d, QuestionCount: %d, AnswerCount: %d, AuthorityCount: %d, AdditionalCount: %d}",
-		h.ID,
-		h.Response,
-		h.Opcode,
-		h.Authoritative,
-		h.Truncated,
-		h.RecursionDesired,
-		h.RecursionAvailable,
-		h.Reserved,
-		h.ResponseCode,
-		h.QuestionCount,
-		h.AnswerCount,
-		h.AuthorityCount,
-		h.AdditionalCount,
-	)
-}
-
-type DNSQuestion struct {
-	Name  DomainName
-	Type  DNSResourceType
-	Class DNSClass
-}
-
-func unmarshalDNSQuestions(data []byte, questionCount int) ([]DNSQuestion, error) {
-	questions := make([]DNSQuestion, 0)
-
-	for i := 0; i < questionCount; i++ {
-		domainName, err := unmarshalDomainName(data)
-		if err != nil {
-			return nil, err
-		}
-		data = data[domainName.Len()+1:]
-
-		// Unmarshal type and class
-		typeData := data[:2]
-		data = data[2:]
-		classData := data[:2]
-		data = data[2:]
-
-		questions = append(questions, DNSQuestion{
-			Name:  *domainName,
-			Type:  DNSResourceType(binary.BigEndian.Uint16(typeData)),
-			Class: DNSClass(binary.BigEndian.Uint16(classData)),
-		})
-	}
-
-	return questions, nil
-}
-
-func marshallDNSQuestions(questions []DNSQuestion) ([]byte, error) {
+func (h *Header) Bytes() []byte {
 	data := make([]byte, 0)
 
-	for _, question := range questions {
-		nameData, err := marshalDomainName(&question.Name)
-		if err != nil {
-			return nil, err
-		}
+	data = append(data, []byte{byte(h.ID >> 8), byte(h.ID)}...)
+	data = append(data, byte(boolToInt(h.QR)<<7|int(h.OPCODE)<<3|boolToInt(h.AA)<<2|boolToInt(h.TC)<<1|boolToInt(h.RD)))
+	data = append(data, byte(boolToInt(h.RA)<<7|int(h.Z)<<4|int(h.RCODE)))
+	data = append(data, []byte{byte(h.QDCOUNT >> 8), byte(h.QDCOUNT)}...)
+	data = append(data, []byte{byte(h.ANCOUNT >> 8), byte(h.ANCOUNT)}...)
+	data = append(data, []byte{byte(h.NSCOUNT >> 8), byte(h.NSCOUNT)}...)
+	data = append(data, []byte{byte(h.ARCOUNT >> 8), byte(h.ARCOUNT)}...)
 
-		// Marshal type and class
-		typeData := make([]byte, 2)
-		binary.BigEndian.PutUint16(typeData, uint16(question.Type))
-		classData := make([]byte, 2)
-		binary.BigEndian.PutUint16(classData, uint16(question.Class))
+	return data
+}
 
-		data = append(data, nameData...)
-		data = append(data, typeData...)
-		data = append(data, classData...)
+func boolToInt(b bool) int {
+	if b {
+		return 1
 	}
-
-	return data, nil
+	return 0
 }
 
-func (q *DNSQuestion) String() string {
-	return fmt.Sprintf(
-		"DNSQuestion{Name: %s, Type: %d, Class: %d}",
-		q.Name,
-		q.Type,
-		q.Class,
-	)
+type Question struct {
+	QNAME  string
+	QTYPE  Type
+	QCLASS Class
 }
 
-type DomainName struct {
-	Labels []string
-}
-
-func (d *DomainName) Len() int {
-	length := 0
-	for _, label := range d.Labels {
-		length += len(label) + 1
-	}
-	return length
-}
-
-func unmarshalDomainName(data []byte) (*DomainName, error) {
-	labels := make([]string, 0)
-
-	for i := 0; i < len(data); {
-		labelLength := int(data[i])
-		i++
-
-		if labelLength == 0 {
-			break
-		}
-
-		if labelLength > 63 {
-			return nil, fmt.Errorf("label too long: %d", labelLength)
-		}
-
-		label := string(data[i : i+labelLength])
-		labels = append(labels, label)
-		i += labelLength
-	}
-
-	return &DomainName{Labels: labels}, nil
-}
-
-func marshalDomainName(domainName *DomainName) ([]byte, error) {
+func (q Question) Marshal() ([]byte, error) {
 	data := make([]byte, 0)
 
-	for _, label := range domainName.Labels {
-		labelLength := len(label)
-		if labelLength > 63 {
-			return nil, fmt.Errorf("label too long: %s", label)
-		}
-
-		data = append(data, byte(labelLength))
+	// Marshal QNAME
+	labels := splitLabels(q.QNAME)
+	for _, label := range labels {
+		data = append(data, byte(len(label)))
 		data = append(data, []byte(label)...)
 	}
-
 	data = append(data, 0)
+
+	// Marshal QTYPE
+	qtypeBytes := q.QTYPE.Bytes()
+	data = append(data, qtypeBytes...)
+
+	// Marshal QCLASS
+	qclassBytes := q.QCLASS.Bytes()
+	data = append(data, qclassBytes...)
 
 	return data, nil
 }
 
-func (d *DomainName) String() string {
-	return strings.Join(d.Labels, ".")
+func splitLabels(name string) []string {
+	labels := make([]string, 0)
+	split := strings.Split(name, ".")
+	for _, label := range split {
+		if label != "" {
+			labels = append(labels, label)
+		}
+	}
+	return labels
 }
 
-type DNSResourceType uint16
+func (q Question) Len() int {
+	return len(q.QNAME) + 1 + 2
+}
+
+func (q Question) String() string {
+	return fmt.Sprintf("QNAME: %s, QTYPE: %s, QCLASS: %s", q.QNAME, q.QTYPE, q.QCLASS)
+}
+
+type ResourceRecord struct {
+	NAME     string
+	TYPE     Type
+	CLASS    Class
+	TTL      uint32
+	RDLENGTH uint16
+	RDATA    Record
+}
+
+func (r ResourceRecord) Marshal() ([]byte, error) {
+	data := make([]byte, 0)
+
+	// Marshal NAME
+	labels := splitLabels(r.NAME)
+	for _, label := range labels {
+		data = append(data, byte(len(label)))
+		data = append(data, []byte(label)...)
+	}
+	data = append(data, 0)
+
+	// Marshal TYPE
+	typeBytes := r.TYPE.Bytes()
+	data = append(data, typeBytes...)
+
+	// Marshal CLASS
+	classBytes := r.CLASS.Bytes()
+	data = append(data, classBytes...)
+
+	// Marshal TTL
+	data = append(data, []byte{byte(r.TTL >> 24), byte(r.TTL >> 16), byte(r.TTL >> 8), byte(r.TTL)}...)
+
+	// Marshal RDLENGTH
+	rdLengthBytes := []byte{byte(r.RDLENGTH >> 8), byte(r.RDLENGTH)}
+	data = append(data, rdLengthBytes...)
+
+	// Marshal RDATA
+	rdataBytes := r.RDATA.Bytes()
+	data = append(data, rdataBytes...)
+
+	return data, nil
+}
+
+func (r ResourceRecord) String() string {
+	return fmt.Sprintf("NAME: %s, TYPE: %s, CLASS: %s, TTL: %d, RDLENGTH: %d, RDATA: %v", r.NAME, r.TYPE, r.CLASS, r.TTL, r.RDLENGTH, r.RDATA)
+}
+
+func (r ResourceRecord) Len() int {
+	return len(r.NAME) + 1 + 2 + 4 + 2 + r.RDATA.Len()
+}
+
+type Record interface {
+	String() string
+	Bytes() []byte
+	Len() int
+}
+
+func unmarshalRecord(rrType Type, data []byte, offset int) (Record, error) {
+	switch rrType {
+	case TypeA:
+		return unmarshalARecord(data, offset)
+	default:
+		return nil, fmt.Errorf("unknown record type: %s", rrType)
+	}
+}
+
+type ARecord struct {
+	IP [4]byte
+}
+
+func unmarshalARecord(data []byte, offset int) (ARecord, error) {
+	if len(data) < offset+4 {
+		return ARecord{}, fmt.Errorf("invalid ARecord")
+	}
+	return ARecord{IP: [4]byte{data[offset], data[offset+1], data[offset+2], data[offset+3]}}, nil
+}
+
+func (a ARecord) String() string {
+	return fmt.Sprintf("%d.%d.%d.%d", a.IP[0], a.IP[1], a.IP[2], a.IP[3])
+}
+
+func (a ARecord) Bytes() []byte {
+	return a.IP[:]
+}
+
+func (a ARecord) Len() int {
+	return 4
+}
+
+type Class uint16
 
 const (
-	TypeA     DNSResourceType = 1
-	TypeNS    DNSResourceType = 2
-	TypeCNAME DNSResourceType = 5
-	TypeSOA   DNSResourceType = 6
-	TypePTR   DNSResourceType = 12
-	TypeMX    DNSResourceType = 15
-	TypeTXT   DNSResourceType = 16
-	TypeAAAA  DNSResourceType = 28
-	TypeSRV   DNSResourceType = 33
-	TypeOPT   DNSResourceType = 41
-	TypeANY   DNSResourceType = 255
+	ClassUnknown Class = 0
+	ClassIN      Class = 1
 )
 
-func (t DNSResourceType) String() string {
+func (c Class) String() string {
+	switch c {
+	case ClassIN:
+		return "IN"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+func (c Class) Bytes() []byte {
+	return []byte{byte(c >> 8), byte(c)}
+}
+
+type Type uint16
+
+const (
+	TypeUnknown Type = 0
+	TypeA       Type = 1
+)
+
+func (t Type) String() string {
 	switch t {
 	case TypeA:
 		return "A"
-	case TypeNS:
-		return "NS"
-	case TypeCNAME:
-		return "CNAME"
-	case TypeSOA:
-		return "SOA"
-	case TypePTR:
-		return "PTR"
-	case TypeMX:
-		return "MX"
-	case TypeTXT:
-		return "TXT"
-	case TypeAAAA:
-		return "AAAA"
-	case TypeSRV:
-		return "SRV"
-	case TypeOPT:
-		return "OPT"
 	default:
-		return fmt.Sprintf("Unknown(%d)", t)
+		return "UNKNOWN"
 	}
 }
 
-type DNSClass uint16
+func (t Type) Bytes() []byte {
+	return []byte{byte(t >> 8), byte(t)}
+}
+
+type OPCode uint8
 
 const (
-	ClassIN  DNSClass = 1
-	ClassCS  DNSClass = 2
-	ClassCH  DNSClass = 3
-	ClassHS  DNSClass = 4
-	ClassANY DNSClass = 255
+	OPCodeUnknown OPCode = 255
+	OPCodeQuery   OPCode = 0
 )
 
-type DNSResource struct {
-	Name     DomainName
-	Type     DNSResourceType
-	Class    DNSClass
-	TTL      uint32
-	Data     []byte
-	DataName DomainName
-}
-
-func (r *DNSResource) String() string {
-	return fmt.Sprintf(
-		"DNSResource{Name: %s, Type: %s, Class: %d, TTL: %d, Data: %s, DataName: %s}",
-		r.Name,
-		r.Type,
-		r.Class,
-		r.TTL,
-		r.Data,
-		r.DataName,
-	)
-}
-
-func unmarshalDNSResources(data []byte, resourceCount int) ([]DNSResource, error) {
-	resources := make([]DNSResource, 0)
-
-	for i := 0; i < resourceCount; i++ {
-		domainName, err := unmarshalDomainName(data)
-		if err != nil {
-			return nil, err
-		}
-		data = data[domainName.Len()+1:]
-
-		// Unmarshal type, class and ttl
-		typeData := data[:2]
-		data = data[2:]
-		classData := data[:2]
-		data = data[2:]
-		ttlData := data[:4]
-		data = data[4:]
-
-		// Unmarshal data length and data
-		dataLength := int(binary.BigEndian.Uint16(data[:2]))
-		data = data[2:]
-		resourceData := data[:dataLength]
-		data = data[dataLength:]
-
-		resources = append(resources, DNSResource{
-			Name:  *domainName,
-			Type:  DNSResourceType(binary.BigEndian.Uint16(typeData)),
-			Class: DNSClass(binary.BigEndian.Uint16(classData)),
-			TTL:   binary.BigEndian.Uint32(ttlData),
-			Data:  resourceData,
-		})
+func (o OPCode) String() string {
+	switch o {
+	case OPCodeQuery:
+		return "QUERY"
+	default:
+		return "UNKNOWN"
 	}
-
-	return resources, nil
 }
 
-func marshallDNSResources(resources []DNSResource) ([]byte, error) {
-	data := make([]byte, 0)
-
-	for _, resource := range resources {
-		nameData, err := marshalDomainName(&resource.Name)
-		if err != nil {
-			return nil, err
-		}
-
-		// Marshal type, class and ttl
-		typeData := make([]byte, 2)
-		binary.BigEndian.PutUint16(typeData, uint16(resource.Type))
-		classData := make([]byte, 2)
-		binary.BigEndian.PutUint16(classData, uint16(resource.Class))
-		ttlData := make([]byte, 4)
-		binary.BigEndian.PutUint32(ttlData, resource.TTL)
-
-		// Marshal data length and data
-		dataLengthData := make([]byte, 2)
-		binary.BigEndian.PutUint16(dataLengthData, uint16(len(resource.Data)))
-
-		data = append(data, nameData...)
-		data = append(data, typeData...)
-		data = append(data, classData...)
-		data = append(data, ttlData...)
-		data = append(data, dataLengthData...)
-		data = append(data, resource.Data...)
-	}
-
-	return data, nil
+func (o OPCode) Bytes() []byte {
+	return []byte{byte(o)}
 }
 
-func MakeResource(name string, resourceType DNSResourceType, class DNSClass, ttl uint32, data []byte) DNSResource {
-	return DNSResource{
-		Name:  DomainName{Labels: strings.Split(name, ".")},
-		Type:  resourceType,
-		Class: 1,
-		TTL:   ttl,
-		Data:  data,
+type RCode uint8
+
+const (
+	RCodeUnknown  RCode = 255
+	RCodeNoErr    RCode = 0
+	RCodeFormErr  RCode = 1
+	RCodeServFail RCode = 2
+	RCodeNXDomain RCode = 3
+	RCodeNotImp   RCode = 4
+	RCodeRefused  RCode = 5
+)
+
+func (r RCode) String() string {
+	switch r {
+	case RCodeNoErr:
+		return "NOERROR"
+	case RCodeFormErr:
+		return "FORMERR"
+	case RCodeNotImp:
+		return "NOTIMP"
+	default:
+		return "UNKNOWN"
 	}
+}
+
+func (r RCode) Bytes() []byte {
+	return []byte{byte(r)}
 }
