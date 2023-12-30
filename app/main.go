@@ -83,6 +83,7 @@ func handleDNSRequest(buffer []byte) []byte {
 
 	for _, question := range dnsMessage.Questions {
 		if question.QTYPE != dns.TypeA || question.QCLASS != dns.ClassIN {
+			fmt.Printf("Question type not supported: QTYPE=%d, QCLASS=%d\n", question.QTYPE, question.QCLASS)
 			dnsMessage.Header.RCODE = dns.RCodeNotImp
 			response, err := dnsMessage.Marshal()
 			if err != nil {
@@ -95,7 +96,7 @@ func handleDNSRequest(buffer []byte) []byte {
 		answer := defaultDNSResource
 		queryDomain := dnsMessage.Questions[0].QNAME
 		answer.NAME = queryDomain
-		dnsMessage.AnswerRRs = []dns.ResourceRecord{answer}
+		dnsMessage.AnswerRRs = append(dnsMessage.AnswerRRs, answer)
 	}
 	dnsMessage.Header.ANCOUNT = uint16(len(dnsMessage.AnswerRRs))
 

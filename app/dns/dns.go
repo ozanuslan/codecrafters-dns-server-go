@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"encoding/binary"
 	"fmt"
 	"strings"
 )
@@ -45,7 +46,7 @@ func (d *DNSMessage) Unmarshal(data []byte) error {
 	}
 
 	d.Header = Header{
-		ID:      uint16(data[0])<<8 | uint16(data[1]),
+		ID:      binary.BigEndian.Uint16(data[0:2]),
 		QR:      data[2]>>7 == 1,
 		OPCODE:  OPCode(data[2]>>3) & 0x0F,
 		AA:      data[2]>>2 == 1,
@@ -54,48 +55,38 @@ func (d *DNSMessage) Unmarshal(data []byte) error {
 		RA:      data[3]>>7 == 1,
 		Z:       data[3] >> 4 & 0x07,
 		RCODE:   RCode(data[3] & 0x0F),
-		QDCOUNT: uint16(data[4])<<8 | uint16(data[5]),
-		ANCOUNT: uint16(data[6])<<8 | uint16(data[7]),
-		NSCOUNT: uint16(data[8])<<8 | uint16(data[9]),
-		ARCOUNT: uint16(data[10])<<8 | uint16(data[11]),
+		QDCOUNT: binary.BigEndian.Uint16(data[4:6]),
+		ANCOUNT: binary.BigEndian.Uint16(data[6:8]),
+		NSCOUNT: binary.BigEndian.Uint16(data[8:10]),
+		ARCOUNT: binary.BigEndian.Uint16(data[10:12]),
 	}
 
-	d.Questions = make([]Question, d.Header.QDCOUNT)
 	offset := 12
 
+	d.Questions = make([]Question, d.Header.QDCOUNT)
 	for i := 0; i < int(d.Header.QDCOUNT); i++ {
-		// support compression
-		// https://tools.ietf.org/html/rfc1035#section-4.1.4
-
-		qNameOffset := offset
-
-		if data[offset]>>6 == 3 {
-			// compression
-			qNameOffset = int(data[offset]&0x3F)<<8 | int(data[offset+1])
+		// handle QNAME (compression is supported)
+		name, o, err := parseName(data, offset, 0)
+		if err != nil {
+			d.Header.RCODE = RCodeFormErr
+			return err
 		}
+		offset = o + 1
 
-		name := ""
-		totalPointerMoves := 0
-		for {
-			labelLength := int(data[qNameOffset])
-			if labelLength == 0 {
-				break
-			}
-			qNameOffset++
-			totalPointerMoves++
-			label := string(data[qNameOffset : qNameOffset+labelLength])
-			name += label + "."
-			qNameOffset += labelLength
-			totalPointerMoves += labelLength
-		}
-		offset += totalPointerMoves + 1
+		fmt.Println("offset: ", offset)
+
+		// fmt.Println("NAME: ", name)
+		// fmt.Println("OFFSET: ", offset)
+		// for j := 0; j < len(data); j++ {
+		// 	fmt.Printf("%d: %08b | %c\n", j, data[j], data[j])
+		// }
 
 		// unmarshal TYPE
-		qtype := Type(uint16(data[offset])<<8 | uint16(data[offset+1]))
+		qtype := Type(binary.BigEndian.Uint16(data[offset : offset+2]))
 		offset += 2
 
 		// unmarshal CLASS
-		qclass := Class(uint16(data[offset])<<8 | uint16(data[offset+1]))
+		qclass := Class(binary.BigEndian.Uint16(data[offset : offset+2]))
 		offset += 2
 
 		d.Questions[i] = Question{
@@ -107,10 +98,8 @@ func (d *DNSMessage) Unmarshal(data []byte) error {
 
 	d.AnswerRRs = make([]ResourceRecord, d.Header.ANCOUNT)
 	for i := 0; i < int(d.Header.ANCOUNT); i++ {
-		// no need for compression support here
-
 		// unmarshal NAME
-		name := ""
+		labels := make([]string, 0)
 		for {
 			labelLength := int(data[offset])
 			if labelLength == 0 {
@@ -118,25 +107,26 @@ func (d *DNSMessage) Unmarshal(data []byte) error {
 			}
 			offset++
 			label := string(data[offset : offset+labelLength])
-			name += label + "."
+			labels = append(labels, label)
 			offset += labelLength
 		}
+		name := strings.Join(labels, ".")
 		offset++
 
 		// unmarshal TYPE
-		rrType := Type(uint16(data[offset])<<8 | uint16(data[offset+1]))
+		rrType := Type(binary.BigEndian.Uint16(data[offset : offset+2]))
 		offset += 2
 
 		// unmarshal CLASS
-		rrClass := Class(uint16(data[offset])<<8 | uint16(data[offset+1]))
+		rrClass := Class(binary.BigEndian.Uint16(data[offset : offset+2]))
 		offset += 2
 
 		// unmarshal TTL
-		ttl := uint32(data[offset])<<24 | uint32(data[offset+1])<<16 | uint32(data[offset+2])<<8 | uint32(data[offset+3])
+		ttl := binary.BigEndian.Uint32(data[offset : offset+4])
 		offset += 4
 
 		// unmarshal RDLENGTH
-		rdLength := uint16(data[offset])<<8 | uint16(data[offset+1])
+		rdLength := binary.BigEndian.Uint16(data[offset : offset+2])
 		offset += 2
 
 		// unmarshal RDATA
@@ -156,6 +146,51 @@ func (d *DNSMessage) Unmarshal(data []byte) error {
 	}
 
 	return nil
+}
+
+func parseName(data []byte, offset int, depth int) (string, int, error) {
+	if depth > 10 {
+		return "", -1, fmt.Errorf("too many compressed labels")
+	}
+
+	labels := make([]string, 0)
+	for {
+		// if 0 octet is found, finished reading labels with compression
+		if data[offset] == 0 {
+			break
+		}
+
+		// if 11000000 (0xC0) is found, handle compression
+		if data[offset]>>6 == 3 {
+			// pointer layout
+			// 1st octet: 11xxxxxx
+			// 2nd octet: xxxxxxxx
+			// first 2 bits are 11
+			// next 14 bits are offset
+			// we want to clear the first 2 bits, so the first octet becomes: 00xxxxxx
+			// then we merge the first octet with the second octet
+			// this gives us the offset: 00xxxxxx xxxxxxxx -> 16 bits
+			compressionOffset := int(data[offset]&0x3F)<<8 | int(data[offset+1])
+			fmt.Println("compressionOffset: ", compressionOffset)
+			offset += 1
+
+			label, o, err := parseName(data, compressionOffset, depth+1)
+			if err != nil {
+				return "", o, err
+			}
+			labels = append(labels, label)
+			break
+		}
+
+		// read labels
+		labelLength := int(data[offset])
+		offset++
+		label := string(data[offset : offset+labelLength])
+		labels = append(labels, label)
+		offset += labelLength
+	}
+
+	return strings.Join(labels, "."), offset, nil
 }
 
 func (d DNSMessage) String() string {
