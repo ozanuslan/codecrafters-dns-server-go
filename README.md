@@ -1,4 +1,4 @@
-[![progress-banner](https://backend.codecrafters.io/progress/dns-server/454afb74-7aaf-4c3b-b84c-93a71f00e5f0)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
+![progress-banner](https://backend.codecrafters.io/progress/dns-server/454afb74-7aaf-4c3b-b84c-93a71f00e5f0)
 
 This is a starting point for Go solutions to the
 ["Build Your Own DNS server" Challenge](https://app.codecrafters.io/courses/dns-server/overview).
