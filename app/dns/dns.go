@@ -12,7 +12,7 @@ type DNSMessage struct {
 	AnswerRRs []ResourceRecord
 }
 
-func (d *DNSMessage) Marshal() ([]byte, error) {
+func (d *DNSMessage) Marshal() []byte {
 	data := make([]byte, 0)
 
 	// Marshal header
@@ -21,23 +21,17 @@ func (d *DNSMessage) Marshal() ([]byte, error) {
 
 	// Marshal questions
 	for _, question := range d.Questions {
-		questionBytes, err := question.Marshal()
-		if err != nil {
-			return nil, err
-		}
+		questionBytes := question.Marshal()
 		data = append(data, questionBytes...)
 	}
 
 	// Marshal answer RRs
 	for _, rr := range d.AnswerRRs {
-		rrBytes, err := rr.Marshal()
-		if err != nil {
-			return nil, err
-		}
+		rrBytes := rr.Marshal()
 		data = append(data, rrBytes...)
 	}
 
-	return data, nil
+	return data
 }
 
 func (d *DNSMessage) Unmarshal(data []byte) error {
@@ -71,15 +65,7 @@ func (d *DNSMessage) Unmarshal(data []byte) error {
 			d.Header.RCODE = RCodeFormErr
 			return err
 		}
-		offset = o + 1
-
-		fmt.Println("offset: ", offset)
-
-		// fmt.Println("NAME: ", name)
-		// fmt.Println("OFFSET: ", offset)
-		// for j := 0; j < len(data); j++ {
-		// 	fmt.Printf("%d: %08b | %c\n", j, data[j], data[j])
-		// }
+		offset = o
 
 		// unmarshal TYPE
 		qtype := Type(binary.BigEndian.Uint16(data[offset : offset+2]))
@@ -99,19 +85,12 @@ func (d *DNSMessage) Unmarshal(data []byte) error {
 	d.AnswerRRs = make([]ResourceRecord, d.Header.ANCOUNT)
 	for i := 0; i < int(d.Header.ANCOUNT); i++ {
 		// unmarshal NAME
-		labels := make([]string, 0)
-		for {
-			labelLength := int(data[offset])
-			if labelLength == 0 {
-				break
-			}
-			offset++
-			label := string(data[offset : offset+labelLength])
-			labels = append(labels, label)
-			offset += labelLength
+		name, o, err := parseName(data, offset, 0)
+		if err != nil {
+			d.Header.RCODE = RCodeFormErr
+			return err
 		}
-		name := strings.Join(labels, ".")
-		offset++
+		offset = o
 
 		// unmarshal TYPE
 		rrType := Type(binary.BigEndian.Uint16(data[offset : offset+2]))
@@ -171,7 +150,6 @@ func parseName(data []byte, offset int, depth int) (string, int, error) {
 			// then we merge the first octet with the second octet
 			// this gives us the offset: 00xxxxxx xxxxxxxx -> 16 bits
 			compressionOffset := int(data[offset]&0x3F)<<8 | int(data[offset+1])
-			fmt.Println("compressionOffset: ", compressionOffset)
 			offset += 1
 
 			label, o, err := parseName(data, compressionOffset, depth+1)
@@ -189,6 +167,7 @@ func parseName(data []byte, offset int, depth int) (string, int, error) {
 		labels = append(labels, label)
 		offset += labelLength
 	}
+	offset++
 
 	return strings.Join(labels, "."), offset, nil
 }
@@ -246,7 +225,7 @@ type Question struct {
 	QCLASS Class
 }
 
-func (q Question) Marshal() ([]byte, error) {
+func (q Question) Marshal() []byte {
 	data := make([]byte, 0)
 
 	// Marshal QNAME
@@ -265,7 +244,7 @@ func (q Question) Marshal() ([]byte, error) {
 	qclassBytes := q.QCLASS.Bytes()
 	data = append(data, qclassBytes...)
 
-	return data, nil
+	return data
 }
 
 func splitLabels(name string) []string {
@@ -296,7 +275,7 @@ type ResourceRecord struct {
 	RDATA    Record
 }
 
-func (r ResourceRecord) Marshal() ([]byte, error) {
+func (r ResourceRecord) Marshal() []byte {
 	data := make([]byte, 0)
 
 	// Marshal NAME
@@ -326,7 +305,7 @@ func (r ResourceRecord) Marshal() ([]byte, error) {
 	rdataBytes := r.RDATA.Bytes()
 	data = append(data, rdataBytes...)
 
-	return data, nil
+	return data
 }
 
 func (r ResourceRecord) String() string {
