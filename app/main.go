@@ -74,6 +74,7 @@ func handleDNSRequest(buffer []byte) []byte {
 		response := dnsMessage.Marshal()
 		return response
 	}
+
 	fmt.Println("Request :", dnsMessage.String())
 
 	if dnsMessage.Header.RCODE != dns.RCodeNoErr {
@@ -91,7 +92,7 @@ func handleDNSRequest(buffer []byte) []byte {
 
 	var response []byte
 	if resolver != "" {
-		response, err = forwardToResolver(buffer, dnsMessage)
+		response, err = forwardToResolver(dnsMessage)
 		if err == nil {
 			return response
 		}
@@ -120,9 +121,7 @@ func handleDNSRequest(buffer []byte) []byte {
 	return response
 }
 
-func forwardToResolver(originalBuffer []byte, dnsMessage dns.DNSMessage) ([]byte, error) {
-	originalID := dnsMessage.Header.ID
-	originalQuestions := dnsMessage.Questions
+func forwardToResolver(originalMessage dns.DNSMessage) ([]byte, error) {
 	conn, err := net.Dial("udp", resolver)
 	if err != nil {
 		fmt.Println("Error connecting to resolver:", err)
@@ -131,7 +130,7 @@ func forwardToResolver(originalBuffer []byte, dnsMessage dns.DNSMessage) ([]byte
 	defer conn.Close()
 
 	resolverResponses := make([]dns.ResourceRecord, 0)
-	for i := 0; i < len(dnsMessage.Questions); i++ {
+	for i := 0; i < len(originalMessage.Questions); i++ {
 		newDnsMessage := dns.DNSMessage{}
 		newDnsMessage.Header.ID = uint16(i)
 		newDnsMessage.Header.QR = false
@@ -148,7 +147,7 @@ func forwardToResolver(originalBuffer []byte, dnsMessage dns.DNSMessage) ([]byte
 		newDnsMessage.Header.ARCOUNT = 0
 
 		newDnsMessage.Questions = make([]dns.Question, 1)
-		newDnsMessage.Questions[0] = dnsMessage.Questions[i]
+		newDnsMessage.Questions[0] = originalMessage.Questions[i]
 
 		buffer := newDnsMessage.Marshal()
 
@@ -185,18 +184,17 @@ func forwardToResolver(originalBuffer []byte, dnsMessage dns.DNSMessage) ([]byte
 		resolverResponses = append(resolverResponses, resolverResponse.AnswerRRs...)
 	}
 
-	dnsMessage.AnswerRRs = resolverResponses
+	originalMessage.AnswerRRs = resolverResponses
 
-	if len(dnsMessage.AnswerRRs) != len(originalQuestions) {
+	if len(originalMessage.AnswerRRs) != len(originalMessage.Questions) {
 		fmt.Println("Invalid response from resolver")
 		return nil, err
 	}
-	dnsMessage.Header.ID = originalID
-	dnsMessage.Questions = originalQuestions
-	dnsMessage.Header.ANCOUNT = uint16(len(dnsMessage.AnswerRRs))
-	dnsMessage.Header.QR = true
 
-	response := dnsMessage.Marshal()
+	originalMessage.Header.ANCOUNT = uint16(len(originalMessage.AnswerRRs))
+	originalMessage.Header.QR = true
+
+	response := originalMessage.Marshal()
 
 	return response, nil
 }
